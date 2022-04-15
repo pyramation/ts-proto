@@ -28,6 +28,7 @@ import {
   isStructType,
   isStructTypeName,
   isTimestamp,
+  isDuration,
   isValueType,
   isWholeNumber,
   isWithinOneOf,
@@ -298,6 +299,7 @@ export function generateFile(ctx: Context, fileDesc: FileDescriptorProto): [stri
 export type Utils = ReturnType<typeof makeDeepPartial> &
   ReturnType<typeof makeObjectIdMethods> &
   ReturnType<typeof makeTimestampMethods> &
+  ReturnType<typeof makeDurationMethods> &
   ReturnType<typeof makeByteUtils> &
   ReturnType<typeof makeLongUtils> &
   ReturnType<typeof makeComparisonUtils>;
@@ -311,6 +313,7 @@ export function makeUtils(options: Options): Utils {
     ...makeDeepPartial(options, longs),
     ...makeObjectIdMethods(options),
     ...makeTimestampMethods(options, longs),
+    ...makeDurationMethods(options, longs),
     ...longs,
     ...makeComparisonUtils(),
   };
@@ -582,7 +585,7 @@ function makeTimestampMethods(options: Options, longs: ReturnType<typeof makeLon
           }
         `
   );
-
+  
   const fromJsonTimestamp = conditionalOutput(
     'fromJsonTimestamp',
     options.useDate === DateOption.DATE
@@ -611,6 +614,62 @@ function makeTimestampMethods(options: Options, longs: ReturnType<typeof makeLon
   );
 
   return { toTimestamp, fromTimestamp, fromJsonTimestamp };
+}
+
+function makeDurationMethods(options: Options, longs: ReturnType<typeof makeLongUtils>) {
+  const Duration = impProto(options, 'google/protobuf/duration', 'Duration');
+
+  let seconds: string | Code = 'date.getTime() / 1_000';
+  let toNumberCode = 't.seconds';
+  if (options.forceLong === LongOption.LONG) {
+    toNumberCode = 't.seconds.toNumber()';
+    seconds = code`${longs.numberToLong}(date.getTime() / 1_000)`;
+  } else if (options.forceLong === LongOption.STRING) {
+    toNumberCode = 'Number(t.seconds)';
+    // Must discard the fractional piece here
+    // Otherwise the fraction ends up on the seconds when parsed as a Long
+    // (note this only occurs when the string is > 8 characters)
+    seconds = 'Math.trunc(date.getTime() / 1_000).toString()';
+  }
+
+  const maybeTypeField = options.outputTypeRegistry ? `$type: 'google.protobuf.Duration',` : '';
+
+  const toDuration = conditionalOutput(
+    'toDuration',
+       code`
+          function toDuration(duration: string): ${Duration} {
+            return {
+              seconds: Long.fromNumber(
+                Math.floor(parseInt(duration) / 1_000_000_000)
+              ),
+              nanos: parseInt(duration) % 1_000_000_000
+            };
+          }
+        `
+  );
+  const fromDuration = conditionalOutput(
+    'fromDuration',
+      code`
+          function fromDuration(duration: ${Duration}): string {
+              return (parseInt(duration.seconds) * 1_000_000_000) + parseInt(duration.nanoseconds);
+          }
+        `
+  );
+
+  const fromJsonDuration = conditionalOutput(
+    'fromJsonDuration',
+      code`
+        function fromJsonDuration(o: any): Duration {
+          if (typeof o === "string") {
+            return ${toDuration}(o);
+          } else {
+            return Duration.fromJSON(o);
+          }
+        }
+      `
+  );
+
+  return { toDuration, fromDuration, fromJsonDuration };
 }
 
 function makeComparisonUtils() {
@@ -841,6 +900,9 @@ function generateDecode(ctx: Context, fullName: string, messageDesc: DescriptorP
     } else if (isTimestamp(field) && (options.useDate === DateOption.DATE || options.useDate === DateOption.STRING)) {
       const type = basicTypeName(ctx, field, { keepValueType: true });
       readSnippet = code`${utils.fromTimestamp}(${type}.decode(reader, reader.uint32()))`;
+    } else if (isDuration(field)) {
+      const type = basicTypeName(ctx, field, { keepValueType: true });
+      readSnippet = code`${utils.fromDuration}(${type}.decode(reader, reader.uint32()))`;
     } else if (isObjectId(field) && options.useMongoObjectId) {
       const type = basicTypeName(ctx, field, { keepValueType: true });
       readSnippet = code`${utils.fromProtoObjectId}(${type}.decode(reader, reader.uint32()))`;
@@ -951,6 +1013,11 @@ function generateEncode(ctx: Context, fullName: string, messageDesc: DescriptorP
       const type = basicTypeName(ctx, field, { keepValueType: true });
       writeSnippet = (place) =>
         code`${type}.encode(${utils.toTimestamp}(${place}), writer.uint32(${tag}).fork()).ldelim()`;
+    } else if (isDuration(field)) {
+      const tag = ((field.number << 3) | 2) >>> 0;
+      const type = basicTypeName(ctx, field, { keepValueType: true });
+      writeSnippet = (place) =>
+        code`${type}.encode(${utils.toDuration}(${place}), writer.uint32(${tag}).fork()).ldelim()`;
     } else if (isValueType(ctx, field)) {
       const maybeTypeField = options.outputTypeRegistry ? `$type: '${field.typeName.slice(1)}',` : '';
 
@@ -1165,6 +1232,8 @@ function generateFromJson(ctx: Context, fullName: string, fullTypeName: string, 
         return code`${utils.fromJsonObjectId}(${from})`;
       } else if (isTimestamp(field) && options.useDate === DateOption.STRING) {
         return code`String(${from})`;
+      } else if (isDuration(field)) {
+        return code`String(${from})`;
       } else if (
         isTimestamp(field) &&
         (options.useDate === DateOption.DATE || options.useDate === DateOption.TIMESTAMP)
@@ -1208,6 +1277,8 @@ function generateFromJson(ctx: Context, fullName: string, fullTypeName: string, 
           } else if (isObjectId(valueField) && options.useMongoObjectId) {
             return code`${utils.fromJsonObjectId}(${from})`;
           } else if (isTimestamp(valueField) && options.useDate === DateOption.STRING) {
+            return code`String(${from})`;
+          } else if (isDuration(valueField)) {
             return code`String(${from})`;
           } else if (
             isTimestamp(valueField) &&
@@ -1355,6 +1426,8 @@ function generateToJson(
         return code`${from}.toISOString()`;
       } else if (isTimestamp(field) && options.useDate === DateOption.STRING) {
         return code`${from}`;
+      } else if (isDuration(field)) {
+        return code`${from}`;
       } else if (isTimestamp(field) && options.useDate === DateOption.TIMESTAMP) {
         return code`${utils.fromTimestamp}(${from}).toISOString()`;
       } else if (isMapType(ctx, messageDesc, field)) {
@@ -1370,6 +1443,8 @@ function generateToJson(
         } else if (isTimestamp(valueType) && options.useDate === DateOption.DATE) {
           return code`${from}.toISOString()`;
         } else if (isTimestamp(valueType) && options.useDate === DateOption.STRING) {
+          return code`${from}`;
+        } else if (isDuration(valueType)) {
           return code`${from}`;
         } else if (isTimestamp(valueType) && options.useDate === DateOption.TIMESTAMP) {
           return code`${utils.fromTimestamp}(${from}).toISOString()`;
@@ -1482,6 +1557,12 @@ function generateFromPartial(ctx: Context, fullName: string, messageDesc: Descri
         isValueType(ctx, field)
       ) {
         return code`${from}`;
+      } else if (
+        isPrimitive(field) ||
+        (isDuration(field)) ||
+        isValueType(ctx, field)
+      ) {
+        return code`${from}`;
       } else if (isMessage(field)) {
         if (isRepeated(field) && isMapType(ctx, messageDesc, field)) {
           const { valueField, valueType } = detectMapType(ctx, messageDesc, field)!;
@@ -1503,6 +1584,10 @@ function generateFromPartial(ctx: Context, fullName: string, messageDesc: Descri
           } else if (
             isTimestamp(valueField) &&
             (options.useDate === DateOption.DATE || options.useDate === DateOption.STRING)
+          ) {
+            return code`${from}`;
+          } else if (
+            isDuration(valueField)
           ) {
             return code`${from}`;
           } else if (isValueType(ctx, valueField)) {
