@@ -413,6 +413,10 @@ export function isTimestamp(field: FieldDescriptorProto): boolean {
   return field.typeName === '.google.protobuf.Timestamp';
 }
 
+export function isDuration(field: FieldDescriptorProto): boolean {
+  return field.typeName === '.google.protobuf.Duration';
+}
+
 export function isValueType(ctx: Context, field: FieldDescriptorProto): boolean {
   return valueTypeName(ctx, field.typeName) !== undefined;
 }
@@ -556,6 +560,10 @@ export function messageToTypeName(
     if (options.useDate == DateOption.STRING) {
       return code`string`;
     }
+  }
+
+  if (!typeOptions.keepValueType && protoType === '.google.protobuf.Duration') {
+    return code`string`;
   }
 
   // need to use endsWith instead of === because objectid could be imported from an external proto file
